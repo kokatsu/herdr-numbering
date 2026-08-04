@@ -1,0 +1,44 @@
+# タブ名の先頭に、タブバー上の位置を [N] として付けるプラグイン。
+# plugin link は symlink を実体解決して plugin_root が /nix/store になるため
+# Home Manager では配置せず、初回のみリポジトリのチェックアウト実パスを直接登録する:
+#   herdr plugin link <dotfiles>/.config/herdr/plugins/tab-numbers
+id = "kokatsu.tab-numbers"
+name = "Tab Position Numbers"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "タブ名の先頭に switch_tab (prefix+1..9) の番号を表示する"
+platforms = ["linux", "macos"]
+
+# 位置はタブの増減・並べ替えで振り直されるため、タブ集合が変わる 4 イベントすべてで
+# 全タブを採番し直す。startup はサーバ再起動・live handoff 後の復旧用
+[[startup]]
+command = ["bash", "renumber.sh"]
+
+[[events]]
+on = "tab.created"
+command = ["bash", "renumber.sh"]
+
+[[events]]
+on = "tab.closed"
+command = ["bash", "renumber.sh"]
+
+[[events]]
+on = "tab.moved"
+command = ["bash", "renumber.sh"]
+
+# 最後のペインを閉じてタブが消える経路では tab.closed が飛ばないため、
+# ペイン側のイベントでも拾う (prefix+x でペインを畳んでいく運用が該当)。
+# タブが減らない場合は差分ゼロで rename を投げずに終わる
+[[events]]
+on = "pane.closed"
+command = ["bash", "renumber.sh"]
+
+[[events]]
+on = "pane.exited"
+command = ["bash", "renumber.sh"]
+
+# 手動リネームで消えた [N] を付け直す。自分の rename も再発火させるが、
+# 2 回目は差分ゼロで rename しないため収束する
+[[events]]
+on = "tab.renamed"
+command = ["bash", "renumber.sh"]
