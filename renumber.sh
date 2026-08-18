@@ -57,13 +57,17 @@ numbering='
   | select(.want != .label)
 '
 
+# Every fallible command here returns explicitly instead of leaning on errexit:
+# the caller invokes this on the left of ||, and that disables errexit for the
+# whole body, so a failed assignment would otherwise fall through to the empty
+# check and report success
 renumber() {
   local tabs_json tab_ids tab_id label
-  tabs_json=$("$herdr_bin" tab list)
+  tabs_json=$("$herdr_bin" tab list 9>&-) || return 1
 
   # Collect the ids through an assignment rather than a process substitution, so
-  # that a jq failure fails the script instead of quietly numbering nothing
-  tab_ids=$(printf '%s' "$tabs_json" | jq -r "$numbering | .tab_id")
+  # that a jq failure is caught instead of quietly numbering nothing
+  tab_ids=$(printf '%s' "$tabs_json" | jq -r "$numbering | .tab_id" 9>&-) || return 1
   # A here-string feeds an empty variable as one empty line, which would reach
   # tab rename as an empty id
   [ -n "$tab_ids" ] || return 0
@@ -72,8 +76,11 @@ renumber() {
   # between. @tsv turns a backslash into \\ and read -r does not decode it, so a
   # tab named "foo\bar" would gain a backslash on every rename and never converge
   while IFS= read -r tab_id; do
-    label=$(printf '%s' "$tabs_json" | jq -r --arg id "$tab_id" "$numbering | select(.tab_id == \$id) | .want")
-    "$herdr_bin" tab rename "$tab_id" "$label" >/dev/null
+    label=$(printf '%s' "$tabs_json" | jq -r --arg id "$tab_id" "$numbering | select(.tab_id == \$id) | .want" 9>&-) || return 1
+    # The list is a snapshot, so a tab can be gone by the time its turn comes -
+    # closing a pane is one of the events this plugin subscribes to. Letting
+    # that fail the run would leave every later tab on its old number
+    "$herdr_bin" tab rename "$tab_id" "$label" 9>&- >/dev/null || true
   done <<<"$tab_ids"
 }
 
@@ -118,14 +125,25 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-acquire || {
-  : >"$pending"
-  exit 0
-}
+# Mark before acquiring, not after failing to acquire. The other order leaves a
+# window in which the holder releases and checks the marker before the loser has
+# written it, and the event that woke the loser is then never numbered
+: >"$pending"
+
+acquire || exit 0
+
+pass_failed=""
 
 while :; do
   rm -f "$pending"
-  renumber
+  # A pass can fail on its own (herdr unreachable, malformed JSON). Dying here
+  # would strand the marker with no process left to act on it, so record it and
+  # carry on to the check below, then exit non-zero once the loop is done so the
+  # plugin log does not record the run as a success
+  renumber || {
+    echo "renumber.sh: renumber pass failed" >&2
+    pass_failed=1
+  }
   # Check for pending work only after dropping the lock. Checking while still
   # holding it and then leaving lets a process that arrives between the check
   # and the EXIT trap drop a marker that nobody picks up
@@ -134,3 +152,5 @@ while :; do
   # Failing to reacquire is fine: whoever took it will handle the fresh list
   acquire || break
 done
+
+[ -z "$pass_failed" ] || exit 1
