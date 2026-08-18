@@ -20,7 +20,8 @@ alone rather than `[3] 3`.
 
 ## Requirements
 
-- herdr 0.7.5 or newer (developed and tested against 0.8.0)
+- herdr 0.8.0 or newer, for the `HERDR_PLUGIN_STATE_DIR` it passes to plugin
+  commands
 - `bash`
 - `jq`
 - `perl` — used for `flock(2)`, because `flock(1)` from util-linux is not
@@ -54,9 +55,10 @@ tab does not always emit `tab.closed`. `tab.renamed` is included so a manual
 rename gets its `[N]` back; the plugin's own rename re-fires that event, but the
 second pass finds no difference and issues no rename, so it converges.
 
-The lock and the pending marker live in the directory herdr hands the plugin
-through `HERDR_PLUGIN_STATE_DIR`, keyed by the full socket path so that separate
-herdr sessions never share them.
+The lock and the pending marker live in `XDG_RUNTIME_DIR`, falling back to the
+directory herdr hands the plugin through `HERDR_PLUGIN_STATE_DIR`. Both are
+private to the user, and the first is cleared on reboot. They are keyed by the
+full socket path, so separate herdr sessions never share them.
 
 Renaming a tab to the name it already has still emits `tab.renamed`, so a large
 tab set can fan out into more concurrent plugin commands than herdr allows

@@ -12,10 +12,16 @@
 set -euo pipefail
 
 herdr_bin=${HERDR_BIN_PATH:-herdr}
-# herdr hands every plugin command a private state directory and creates it
-# ahead of time. The fallback only matters when the script is run by hand
-state_dir=${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/kokatsu.tab-numbers}
-mkdir -p "$state_dir"
+# herdr creates a private state directory per plugin and names it in the
+# environment of every runtime command, so require it rather than reconstructing
+# herdr's layout here. min_herdr_version gates the versions that provide it
+state_dir=${HERDR_PLUGIN_STATE_DIR:?renumber.sh: HERDR_PLUGIN_STATE_DIR is not set (run this through herdr)}
+# The lock and the marker are runtime state, so prefer the runtime directory:
+# it is per-user (0700) and is cleared on reboot, which keeps one file per
+# session from accumulating. The state directory is the fallback because a
+# world-writable /tmp is not a safe place for a predictable file name
+runtime_dir=${XDG_RUNTIME_DIR:-$state_dir}
+mkdir -p "$runtime_dir"
 
 # Each session has its own set of tabs, so key the state on the socket path.
 # The whole path is sanitized rather than reduced to its parent directory name:
@@ -25,8 +31,8 @@ mkdir -p "$state_dir"
 # name herdr accepts. Hashing would be an option but sha256sum is not part of a
 # stock macOS
 session_key=$(printf '%s' "${HERDR_SOCKET_PATH:-default}" | tr -c '[:alnum:]._-' '_')
-lock_file="$state_dir/$session_key.lock"
-pending="$state_dir/$session_key.pending"
+lock_file="$runtime_dir/herdr-tab-numbers.$session_key.lock"
+pending="$runtime_dir/herdr-tab-numbers.$session_key.pending"
 
 # A failure to acquire the lock cannot be told apart from "another process holds
 # it", so a missing dependency would stop the numbering silently. Both are

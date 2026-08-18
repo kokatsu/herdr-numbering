@@ -3,7 +3,7 @@
 id = "kokatsu.tab-numbers"
 name = "Tab Position Numbers"
 version = "0.1.0"
-min_herdr_version = "0.7.5"
+min_herdr_version = "0.8.0"
 description = "Prefix each tab name with its switch_tab position"
 platforms = ["linux", "macos"]
 
