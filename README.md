@@ -54,6 +54,10 @@ tab does not always emit `tab.closed`. `tab.renamed` is included so a manual
 rename gets its `[N]` back; the plugin's own rename re-fires that event, but the
 second pass finds no difference and issues no rename, so it converges.
 
+The lock and the pending marker live in the directory herdr hands the plugin
+through `HERDR_PLUGIN_STATE_DIR`, keyed by the full socket path so that separate
+herdr sessions never share them.
+
 Renaming a tab to the name it already has still emits `tab.renamed`, so a large
 tab set can fan out into more concurrent plugin commands than herdr allows
 (the limit is 32; a 16-tab renumber was observed to hit it). To avoid that, the

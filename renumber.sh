@@ -12,11 +12,21 @@
 set -euo pipefail
 
 herdr_bin=${HERDR_BIN_PATH:-herdr}
-# Each session has its own set of tabs, so key the state on the socket location
-runtime_dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
-session_key=$(basename "$(dirname "${HERDR_SOCKET_PATH:-herdr/default.sock}")")
-lock_file="$runtime_dir/herdr-tab-numbers.$session_key.lock"
-pending="$runtime_dir/herdr-tab-numbers.$session_key.pending"
+# herdr hands every plugin command a private state directory and creates it
+# ahead of time. The fallback only matters when the script is run by hand
+state_dir=${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/kokatsu.tab-numbers}
+mkdir -p "$state_dir"
+
+# Each session has its own set of tabs, so key the state on the socket path.
+# The whole path is sanitized rather than reduced to its parent directory name:
+# the default session lives at ~/.config/herdr/herdr.sock and a named one at
+# ~/.config/herdr/sessions/<name>/herdr.sock, so the parent directory alone
+# collides between the default session and a session named "herdr", which is a
+# name herdr accepts. Hashing would be an option but sha256sum is not part of a
+# stock macOS
+session_key=$(printf '%s' "${HERDR_SOCKET_PATH:-default}" | tr -c '[:alnum:]._-' '_')
+lock_file="$state_dir/$session_key.lock"
+pending="$state_dir/$session_key.pending"
 
 # A failure to acquire the lock cannot be told apart from "another process holds
 # it", so a missing dependency would stop the numbering silently. Both are
