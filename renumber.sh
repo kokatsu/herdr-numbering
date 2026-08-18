@@ -18,11 +18,17 @@ session_key=$(basename "$(dirname "${HERDR_SOCKET_PATH:-herdr/default.sock}")")
 lock_file="$runtime_dir/herdr-tab-numbers.$session_key.lock"
 pending="$runtime_dir/herdr-tab-numbers.$session_key.pending"
 
-# A failure to acquire that cannot be told apart from "another process holds it"
-# would stop the numbering silently, so a missing perl is logged to the hook log
-# and treated as fatal
+# A failure to acquire the lock cannot be told apart from "another process holds
+# it", so a missing dependency would stop the numbering silently. Both are
+# checked up front and treated as fatal, which puts the reason in the hook log.
+# The assignment below does propagate a jq failure on its own, but the up-front
+# check names the missing dependency instead of leaving a bare jq error
 command -v perl >/dev/null || {
   echo "renumber.sh: perl is required (used for flock)" >&2
+  exit 1
+}
+command -v jq >/dev/null || {
+  echo "renumber.sh: jq is required" >&2
   exit 1
 }
 
@@ -42,8 +48,15 @@ numbering='
 '
 
 renumber() {
-  local tabs_json tab_id label
+  local tabs_json tab_ids tab_id label
   tabs_json=$("$herdr_bin" tab list)
+
+  # Collect the ids through an assignment rather than a process substitution, so
+  # that a jq failure fails the script instead of quietly numbering nothing
+  tab_ids=$(printf '%s' "$tabs_json" | jq -r "$numbering | .tab_id")
+  # A here-string feeds an empty variable as one empty line, which would reach
+  # tab rename as an empty id
+  [ -n "$tab_ids" ] || return 0
 
   # Take labels one at a time from the raw output of jq -r, with no delimiter in
   # between. @tsv turns a backslash into \\ and read -r does not decode it, so a
@@ -51,7 +64,7 @@ renumber() {
   while IFS= read -r tab_id; do
     label=$(printf '%s' "$tabs_json" | jq -r --arg id "$tab_id" "$numbering | select(.tab_id == \$id) | .want")
     "$herdr_bin" tab rename "$tab_id" "$label" >/dev/null
-  done < <(printf '%s' "$tabs_json" | jq -r "$numbering | .tab_id")
+  done <<<"$tab_ids"
 }
 
 # A rename re-fires tab.renamed even when the label is unchanged, so with many
