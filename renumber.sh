@@ -47,6 +47,10 @@ command -v jq >/dev/null || {
   echo "renumber.sh: jq is required" >&2
   exit 1
 }
+command -v "$herdr_bin" >/dev/null || {
+  echo "renumber.sh: $herdr_bin not found (set HERDR_BIN_PATH)" >&2
+  exit 1
+}
 
 # Project one tab into {tab_id, label, want} and keep only the ones that need a
 # rename. $tab and friends are jq variables, so keep the shell out of them

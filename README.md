@@ -51,7 +51,7 @@ on `startup` (to recover after a server restart or live handoff) and on
 `pane.exited`.
 
 `pane.closed` and `pane.exited` are included because closing the last pane of a
-tab does not always emit `tab.closed`. `tab.renamed` is included so a manual
+tab does not emit `tab.closed`. `tab.renamed` is included so a manual
 rename gets its `[N]` back; the plugin's own rename re-fires that event, but the
 second pass finds no difference and issues no rename, so it converges.
 

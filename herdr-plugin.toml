@@ -8,8 +8,8 @@ description = "Prefix each tab name with its switch_tab position"
 platforms = ["linux", "macos"]
 
 # Positions are reassigned whenever tabs are added, removed, or reordered, so
-# renumber every tab on all four events that change the set of tabs. startup
-# covers recovery after a server restart or a live handoff
+# every event that can change the set of tabs renumbers all of them. startup is
+# not such an event; it covers recovery after a server restart or a live handoff
 [[startup]]
 command = ["bash", "renumber.sh"]
 
