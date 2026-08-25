@@ -1,5 +1,7 @@
 #!/bin/bash
-# Normalize every tab name in every workspace to "[N] name".
+# Normalize every tab name in every workspace, and every workspace name, to
+# a numbered form ("[N] name" for tabs and "(N) name" for workspaces by
+# default; both formats are configurable, see the config block below).
 #
 # N is the tab's position on the tab bar, not herdr's stable tab number (the
 # `number` field of `tab list`). switch_tab (prefix+1..9) was confirmed on
@@ -52,17 +54,77 @@ command -v "$herdr_bin" >/dev/null || {
   exit 1
 }
 
+# The number formats default to "[{n}]" for tabs and "({n})" for workspaces,
+# so the two kinds stay distinguishable at a glance. Both can be overridden
+# from config.toml in the directory herdr assigns the plugin
+# (`herdr plugin config-dir kokatsu.tab-numbers`). Only the flat
+# `key = "value"` form is recognized - pulling in a TOML parser for two keys
+# is not worth a new dependency, though a trailing comment after the closing
+# quote is tolerated - and a value without the {n} placeholder is ignored so a
+# typo cannot erase every number
+tab_format='[{n}]'
+workspace_format='({n})'
+config_file=${HERDR_PLUGIN_CONFIG_DIR:+$HERDR_PLUGIN_CONFIG_DIR/config.toml}
+if [ -n "$config_file" ] && [ -f "$config_file" ]; then
+  v=$(sed -n 's/^[[:space:]]*tab_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1)
+  case $v in *"{n}"*) tab_format=$v ;; esac
+  v=$(sed -n 's/^[[:space:]]*workspace_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1)
+  case $v in *"{n}"*) workspace_format=$v ;; esac
+fi
+
+# Turn a format template into the regex that recognizes labels it produced:
+# regex-escape every text segment and put [0-9]+ in each {n} hole
+format_to_regex() {
+  local rest=$1 literal escaped
+  while [[ $rest == *"{n}"* ]]; do
+    literal=${rest%%"{n}"*}
+    escaped=$(printf '%s' "$literal" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+    printf '%s[0-9]+' "$escaped"
+    rest=${rest#*"{n}"}
+  done
+  escaped=$(printf '%s' "$rest" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+  printf '%s' "$escaped"
+}
+
+# Strip patterns accept the configured format plus the shipped default for
+# that kind ([N] for tabs, (N) for workspaces), so switching away from a
+# default migrates existing labels instead of stacking a second prefix on top
+# of the old one. No other alternates: anything else a label starts with is a
+# real name, and stripping more than the formats this plugin actually writes
+# would eat it
+tab_strip="^($(format_to_regex "$tab_format")\\s*|\\[[0-9]+\\]\\s*)"
+ws_strip="^($(format_to_regex "$workspace_format")\\s*|\\([0-9]+\\)\\s*)"
+
 # Project one tab into {tab_id, label, want} and keep only the ones that need a
 # rename. $tab and friends are jq variables, so keep the shell out of them
 # shellcheck disable=SC2016
 numbering='
   [.result.tabs | group_by(.workspace_id)[] | to_entries[] | .value + {pos: (.key + 1)}][]
   | . as $tab
-  | ($tab.label | sub("^\\[[0-9]+\\]\\s*"; "")) as $stripped
+  | ($fmt | gsub("\\{n\\}"; ($tab.pos | tostring))) as $prefix
+  | ($tab.label | sub($strip; "")) as $stripped
   | {
       tab_id: $tab.tab_id,
       label: $tab.label,
-      want: (if ($stripped | test("^[0-9]*$")) then "[\($tab.pos)]" else "[\($tab.pos)] \($stripped)" end)
+      want: (if ($stripped | test("^[0-9]*$")) then $prefix else "\($prefix) \($stripped)" end)
+    }
+  | select(.want != .label)
+'
+
+# The workspace pass rides on herdr's own numbering: unlike the stable tab
+# number, `workspace list`'s `number` field reflows to stay equal to the
+# sidebar position (verified on 0.8.2 by closing a middle workspace), so it is
+# used directly instead of recomputing positions.
+# shellcheck disable=SC2016
+ws_numbering='
+  .result.workspaces[]
+  | . as $ws
+  | ($fmt | gsub("\\{n\\}"; ($ws.number | tostring))) as $prefix
+  | ($ws.label | sub($strip; "")) as $stripped
+  | {
+      workspace_id: $ws.workspace_id,
+      label: $ws.label,
+      want: (if $stripped == "" then $prefix else "\($prefix) \($stripped)" end)
     }
   | select(.want != .label)
 '
@@ -77,7 +139,7 @@ renumber() {
 
   # Collect the ids through an assignment rather than a process substitution, so
   # that a jq failure is caught instead of quietly numbering nothing
-  tab_ids=$(printf '%s' "$tabs_json" | jq -r "$numbering | .tab_id" 9>&-) || return 1
+  tab_ids=$(printf '%s' "$tabs_json" | jq -r --arg fmt "$tab_format" --arg strip "$tab_strip" "$numbering | .tab_id" 9>&-) || return 1
   # A here-string feeds an empty variable as one empty line, which would reach
   # tab rename as an empty id
   [ -n "$tab_ids" ] || return 0
@@ -86,12 +148,27 @@ renumber() {
   # between. @tsv turns a backslash into \\ and read -r does not decode it, so a
   # tab named "foo\bar" would gain a backslash on every rename and never converge
   while IFS= read -r tab_id; do
-    label=$(printf '%s' "$tabs_json" | jq -r --arg id "$tab_id" "$numbering | select(.tab_id == \$id) | .want" 9>&-) || return 1
+    label=$(printf '%s' "$tabs_json" | jq -r --arg fmt "$tab_format" --arg strip "$tab_strip" --arg id "$tab_id" "$numbering | select(.tab_id == \$id) | .want" 9>&-) || return 1
     # The list is a snapshot, so a tab can be gone by the time its turn comes -
     # closing a pane is one of the events this plugin subscribes to. Letting
     # that fail the run would leave every later tab on its old number
     "$herdr_bin" tab rename "$tab_id" "$label" 9>&- >/dev/null || true
   done <<<"$tab_ids"
+}
+
+# The workspace pass mirrors renumber() one level up, including the snapshot
+# caveat: a workspace can be gone by the time its rename comes around
+renumber_workspaces() {
+  local ws_json ws_ids ws_id label
+  ws_json=$("$herdr_bin" workspace list 9>&-) || return 1
+
+  ws_ids=$(printf '%s' "$ws_json" | jq -r --arg fmt "$workspace_format" --arg strip "$ws_strip" "$ws_numbering | .workspace_id" 9>&-) || return 1
+  [ -n "$ws_ids" ] || return 0
+
+  while IFS= read -r ws_id; do
+    label=$(printf '%s' "$ws_json" | jq -r --arg fmt "$workspace_format" --arg strip "$ws_strip" --arg id "$ws_id" "$ws_numbering | select(.workspace_id == \$id) | .want" 9>&-) || return 1
+    "$herdr_bin" workspace rename "$ws_id" "$label" 9>&- >/dev/null || true
+  done <<<"$ws_ids"
 }
 
 # A rename re-fires tab.renamed even when the label is unchanged, so with many
@@ -152,6 +229,10 @@ while :; do
   # plugin log does not record the run as a success
   renumber || {
     echo "renumber.sh: renumber pass failed" >&2
+    pass_failed=1
+  }
+  renumber_workspaces || {
+    echo "renumber.sh: workspace pass failed" >&2
     pass_failed=1
   }
   # Check for pending work only after dropping the lock. Checking while still

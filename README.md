@@ -1,12 +1,18 @@
 # herdr-tab-numbers
 
 A [herdr](https://github.com/herdrdev/herdr) plugin that prefixes every tab name
-with its position on the tab bar, so you can see which `switch_tab` key
-(`prefix+1`..`prefix+9`) jumps to which tab.
+with its position on the tab bar, and every workspace name with its position in
+the sidebar, so you can see which `switch_tab` key (`prefix+1`..`prefix+9`) or
+`switch_workspace` key jumps where. Tabs and workspaces use different shapes so
+the two kinds of number stay distinguishable at a glance.
 
 ```text
-[1] server   [2] logs   [3] nvim
+tab bar:  [1] server   [2] logs   [3] nvim
+sidebar:  (1) work     (2) dotfiles
 ```
+
+`switch_workspace` is unset by default; bind it (for example to
+`prefix+shift+1..9`) in `config.toml` to jump by the displayed number.
 
 ## Why position, not tab number
 
@@ -18,10 +24,41 @@ Tabs you never named carry an auto-generated name that is the position itself
 (`"3"`), so a purely numeric name is treated as "no name" and rendered as `[3]`
 alone rather than `[3] 3`.
 
+Workspaces are simpler: herdr keeps the `number` of `workspace list` equal to
+the sidebar position (closing a workspace renumbers the rest, verified on
+0.8.2), so the plugin displays it directly, as `(2) dotfiles`. A purely
+numeric workspace name is kept, because workspace auto-names come from the
+directory name and `3` can be a real directory.
+
+## Configuration
+
+The formats default to `[{n}]` for tabs and `({n})` for workspaces. To change
+either, create `config.toml` in the directory this prints:
+
+```bash
+herdr plugin config-dir kokatsu.tab-numbers
+```
+
+```toml
+tab_format = "[{n}]"
+workspace_format = "({n})"
+```
+
+`{n}` marks where the number goes and must be present; every occurrence is
+replaced, and a value without it is ignored. Keep some separator around `{n}`:
+a bare `"{n}"` format makes the strip pattern match any leading digits, so a
+name like `2026 planning` would lose its year. Only the flat `key = "value"` form
+is parsed. Labels written in the configured format, or in any format this plugin
+ships as a default, are
+recognized and rewritten when the format changes; switching between two custom
+formats can leave the old prefix behind, in which case renaming the affected
+tab or workspace once clears it.
+
 ## Requirements
 
-- herdr 0.8.0 or newer, for the `HERDR_PLUGIN_STATE_DIR` it passes to plugin
-  commands
+- herdr 0.8.2 or newer — the workspace pass relies on `workspace list`
+  renumbering `number` to match the sidebar position, and the config file is
+  found through `HERDR_PLUGIN_CONFIG_DIR`; both were verified on 0.8.2
 - `bash`
 - `jq`
 - `perl` — used for `flock(2)`, because `flock(1)` from util-linux is not
@@ -40,15 +77,19 @@ git clone https://github.com/kokatsu/herdr-tab-numbers
 herdr plugin link ./herdr-tab-numbers
 ```
 
-No configuration or key binding is needed. Numbering is applied on startup and
-whenever the set of tabs changes.
+Tab numbering needs no configuration or key binding; jumping to a workspace by
+its number needs `switch_workspace` bound (unset by default, see above).
+Numbering is applied on startup and whenever the set of tabs or workspaces
+changes.
 
 ## How it works
 
-`renumber.sh` rewrites every tab name in every workspace to `[N] name`. It runs
-on `startup` (to recover after a server restart or live handoff) and on
-`tab.created`, `tab.closed`, `tab.moved`, `tab.renamed`, `pane.closed`, and
-`pane.exited`.
+`renumber.sh` rewrites every tab name in every workspace, and every workspace
+name, to its numbered form. It runs on `startup` (to recover after a server restart or
+live handoff), on `tab.created`, `tab.closed`, `tab.moved`, `tab.renamed`,
+`pane.closed`, and `pane.exited`, and on `workspace.created`,
+`workspace.closed`, `workspace.moved`, `workspace.reordered`, and
+`workspace.renamed`.
 
 `pane.closed` and `pane.exited` are included because closing the last pane of a
 tab does not emit `tab.closed`. `tab.renamed` is included so a manual
