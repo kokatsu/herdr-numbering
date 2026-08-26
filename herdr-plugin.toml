@@ -1,12 +1,15 @@
-# Prefixes each tab name with its position on the tab bar (as "[N]") and each
-# workspace name with its position in the sidebar (as "(N)"); both formats are
-# configurable.
+# Prefixes each tab name with its position on the tab bar (as "[N]") and
+# reports each workspace's sidebar position as display-only metadata (as
+# "(N)", shown through the sidebar's $number token for workspaces and the
+# $wsnum token for panes in the agents section); both formats are
+# configurable. Workspace labels are never renamed, so herdr keeps deriving
+# them from the focused pane's cwd / Git repository root.
 # See README.md for install steps and the reasoning behind the design.
 id = "kokatsu.tab-numbers"
 name = "Tab & Workspace Numbers"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.8.2"
-description = "Prefix tab and workspace names with their switch position"
+description = "Number tabs in their names and workspaces via sidebar metadata"
 platforms = ["linux", "macos"]
 
 # Positions are reassigned whenever tabs are added, removed, or reordered, so
@@ -30,13 +33,23 @@ command = ["bash", "renumber.sh"]
 # Closing the last pane of a tab does not emit tab.closed, so the pane-side
 # events are watched as well (this is the path taken when panes are folded away
 # one at a time with prefix+x). When no tab disappears, the run finds no
-# difference and exits without issuing a rename
+# difference and exits without issuing a rename. pane.created and pane.moved
+# are watched so a new or moved pane promptly carries the wsnum token the
+# agents section of the sidebar reads
 [[events]]
 on = "pane.closed"
 command = ["bash", "renumber.sh"]
 
 [[events]]
 on = "pane.exited"
+command = ["bash", "renumber.sh"]
+
+[[events]]
+on = "pane.created"
+command = ["bash", "renumber.sh"]
+
+[[events]]
+on = "pane.moved"
 command = ["bash", "renumber.sh"]
 
 # Restore the [N] that a manual rename dropped. This re-fires on the plugin's
@@ -49,8 +62,8 @@ command = ["bash", "renumber.sh"]
 # Workspace numbers reflow on their own (herdr keeps `number` equal to the
 # sidebar position, closing a workspace renumbers the rest), so only the events
 # that change the set or the order of workspaces need to re-run the script.
-# workspace.renamed restores the number prefix a manual rename dropped,
-# converging the same way tab.renamed does
+# workspace.renamed is not needed: renames do not move workspaces, and the
+# number lives in metadata a rename cannot touch
 [[events]]
 on = "workspace.created"
 command = ["bash", "renumber.sh"]
@@ -65,8 +78,4 @@ command = ["bash", "renumber.sh"]
 
 [[events]]
 on = "workspace.reordered"
-command = ["bash", "renumber.sh"]
-
-[[events]]
-on = "workspace.renamed"
 command = ["bash", "renumber.sh"]

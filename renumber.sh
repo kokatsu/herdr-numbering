@@ -1,7 +1,10 @@
 #!/bin/bash
-# Normalize every tab name in every workspace, and every workspace name, to
-# a numbered form ("[N] name" for tabs and "(N) name" for workspaces by
-# default; both formats are configurable, see the config block below).
+# Prefix every tab name with its position ("[N] name" by default), and report
+# every workspace's position as display-only metadata ("(N)" by default) for
+# the sidebar's $number token. Both formats are configurable, see the config
+# block below. Workspaces are never renamed: a rename would set the custom
+# name and permanently stop herdr from deriving the label from the focused
+# pane's cwd / Git repository root.
 #
 # N is the tab's position on the tab bar, not herdr's stable tab number (the
 # `number` field of `tab list`). switch_tab (prefix+1..9) was confirmed on
@@ -66,9 +69,14 @@ tab_format='[{n}]'
 workspace_format='({n})'
 config_file=${HERDR_PLUGIN_CONFIG_DIR:+$HERDR_PLUGIN_CONFIG_DIR/config.toml}
 if [ -n "$config_file" ] && [ -f "$config_file" ]; then
-  v=$(sed -n 's/^[[:space:]]*tab_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1)
+  # Whitespace around a format is trimmed off: herdr trims reported token
+  # values before storing them (verified on 0.8.2), so a padded workspace
+  # format would never equal the stored token and the mismatch gates below
+  # would re-report every workspace and pane on every event
+  trim='s/^[[:space:]]*//;s/[[:space:]]*$//'
+  v=$(sed -n 's/^[[:space:]]*tab_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1 | sed "$trim")
   case $v in *"{n}"*) tab_format=$v ;; esac
-  v=$(sed -n 's/^[[:space:]]*workspace_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1)
+  v=$(sed -n 's/^[[:space:]]*workspace_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1 | sed "$trim")
   case $v in *"{n}"*) workspace_format=$v ;; esac
 fi
 
@@ -86,14 +94,12 @@ format_to_regex() {
   printf '%s' "$escaped"
 }
 
-# Strip patterns accept the configured format plus the shipped default for
-# that kind ([N] for tabs, (N) for workspaces), so switching away from a
-# default migrates existing labels instead of stacking a second prefix on top
-# of the old one. No other alternates: anything else a label starts with is a
-# real name, and stripping more than the formats this plugin actually writes
-# would eat it
+# The strip pattern accepts the configured format plus the shipped default
+# ([N]), so switching away from the default migrates existing labels instead
+# of stacking a second prefix on top of the old one. No other alternates:
+# anything else a label starts with is a real name, and stripping more than
+# the formats this plugin actually writes would eat it
 tab_strip="^($(format_to_regex "$tab_format")\\s*|\\[[0-9]+\\]\\s*)"
-ws_strip="^($(format_to_regex "$workspace_format")\\s*|\\([0-9]+\\)\\s*)"
 
 # Project one tab into {tab_id, label, want} and keep only the ones that need a
 # rename. $tab and friends are jq variables, so keep the shell out of them
@@ -114,19 +120,39 @@ numbering='
 # The workspace pass rides on herdr's own numbering: unlike the stable tab
 # number, `workspace list`'s `number` field reflows to stay equal to the
 # sidebar position (verified on 0.8.2 by closing a middle workspace), so it is
-# used directly instead of recomputing positions.
+# used directly instead of recomputing positions. No strip is involved because
+# labels are never touched: the number only exists as metadata
 # shellcheck disable=SC2016
-ws_numbering='
+# Pairs of "workspace_id token" split on the first space, like pane_tokens:
+# workspace ids cannot contain spaces, tokens can. Only mismatches are
+# emitted: the snapshot already carries the visible tokens, so the steady
+# state costs zero commands, like the tab pass's `.want != .label` gate
+ws_token='
   .result.workspaces[]
   | . as $ws
-  | ($fmt | gsub("\\{n\\}"; ($ws.number | tostring))) as $prefix
-  | ($ws.label | sub($strip; "")) as $stripped
-  | {
-      workspace_id: $ws.workspace_id,
-      label: $ws.label,
-      want: (if $stripped == "" then $prefix else "\($prefix) \($stripped)" end)
-    }
-  | select(.want != .label)
+  | ($fmt | gsub("\\{n\\}"; ($ws.number | tostring))) as $want
+  | select(($ws.tokens.number? // "") != $want)
+  | "\($ws.workspace_id) \($want)"
+'
+
+# Panes carry their workspace's number too, because the agents section of the
+# sidebar resolves custom tokens from pane metadata, not workspace metadata.
+# The output pairs "pane_id token" split on the first space; pane ids cannot
+# contain spaces, tokens can
+# shellcheck disable=SC2016
+pane_tokens='
+  ($ws.result.workspaces | map({key: .workspace_id, value: .number}) | from_entries) as $num
+  | .result.panes[]
+  | . as $pane
+  # Indexing with null throws in jq, so a pane record without a workspace_id
+  # (none seen live, but not guaranteed during teardown) must not kill the
+  # whole pass
+  | select($pane.workspace_id != null)
+  | $num[$pane.workspace_id] as $n
+  | select($n != null)
+  | ($fmt | gsub("\\{n\\}"; ($n | tostring))) as $want
+  | select(($pane.tokens.wsnum? // "") != $want)
+  | "\($pane.pane_id) \($want)"
 '
 
 # Every fallible command here returns explicitly instead of leaning on errexit:
@@ -156,19 +182,40 @@ renumber() {
   done <<<"$tab_ids"
 }
 
-# The workspace pass mirrors renumber() one level up, including the snapshot
-# caveat: a workspace can be gone by the time its rename comes around
-renumber_workspaces() {
-  local ws_json ws_ids ws_id label
-  ws_json=$("$herdr_bin" workspace list 9>&-) || return 1
+# The workspace pass reports each workspace's number as display-only metadata
+# for the sidebar's $number token, instead of renaming. Reports do not emit
+# an event this plugin subscribes to, and the metadata does not survive a
+# server restart (the startup hook re-reports it)
+number_workspaces() {
+  local ws_json=$1 pairs ws_id token
+  pairs=$(printf '%s' "$ws_json" | jq -r --arg fmt "$workspace_format" "$ws_token" 9>&-) || return 1
+  [ -n "$pairs" ] || return 0
 
-  ws_ids=$(printf '%s' "$ws_json" | jq -r --arg fmt "$workspace_format" --arg strip "$ws_strip" "$ws_numbering | .workspace_id" 9>&-) || return 1
-  [ -n "$ws_ids" ] || return 0
+  # read's IFS split only touches the edges of the token, and the format trim
+  # above keeps those free of whitespace; interior spaces (a format like
+  # "No. {n}") land in $token verbatim
+  while read -r ws_id token; do
+    # The workspace can be gone by the time its turn comes - workspace.closed
+    # is one of the triggers - so a failed report is tolerated
+    "$herdr_bin" workspace report-metadata "$ws_id" --source kokatsu.tab-numbers --token number="$token" 9>&- >/dev/null || true
+  done <<<"$pairs"
+}
 
-  while IFS= read -r ws_id; do
-    label=$(printf '%s' "$ws_json" | jq -r --arg fmt "$workspace_format" --arg strip "$ws_strip" --arg id "$ws_id" "$ws_numbering | select(.workspace_id == \$id) | .want" 9>&-) || return 1
-    "$herdr_bin" workspace rename "$ws_id" "$label" 9>&- >/dev/null || true
-  done <<<"$ws_ids"
+# Mirror each workspace's number onto its panes as a wsnum token, for the
+# agents section of the sidebar
+number_panes() {
+  local ws_json=$1 panes_json pairs pane_id token
+  panes_json=$("$herdr_bin" pane list 9>&-) || return 1
+
+  pairs=$(printf '%s' "$panes_json" | jq -r --arg fmt "$workspace_format" \
+    --argjson ws "$ws_json" "$pane_tokens" 9>&-) || return 1
+  [ -n "$pairs" ] || return 0
+
+  while read -r pane_id token; do
+    # The pane can be gone by the time its turn comes - pane.closed is one of
+    # the triggers - so a failed report is tolerated
+    "$herdr_bin" pane report-metadata "$pane_id" --source kokatsu.tab-numbers --token wsnum="$token" 9>&- >/dev/null || true
+  done <<<"$pairs"
 }
 
 # A rename re-fires tab.renamed even when the label is unchanged, so with many
@@ -231,10 +278,21 @@ while :; do
     echo "renumber.sh: renumber pass failed" >&2
     pass_failed=1
   }
-  renumber_workspaces || {
-    echo "renumber.sh: workspace pass failed" >&2
+  # One snapshot serves both passes: it halves the plugin-command IPC per
+  # event and keeps the two passes from disagreeing about the numbers
+  if ws_json=$("$herdr_bin" workspace list 9>&-); then
+    number_workspaces "$ws_json" || {
+      echo "renumber.sh: workspace pass failed" >&2
+      pass_failed=1
+    }
+    number_panes "$ws_json" || {
+      echo "renumber.sh: pane pass failed" >&2
+      pass_failed=1
+    }
+  else
+    echo "renumber.sh: workspace list failed" >&2
     pass_failed=1
-  }
+  fi
   # Check for pending work only after dropping the lock. Checking while still
   # holding it and then leaving lets a process that arrives between the check
   # and the EXIT trap drop a marker that nobody picks up
