@@ -171,23 +171,27 @@ update_existing() {
 # whole body, so a failed assignment would otherwise fall through to the empty
 # check and report success
 renumber() {
-  local tabs_json tab_ids tab_id label failed=0
+  local tabs_json pairs tab_id encoded_label label failed=0
   tabs_json=$("$herdr_bin" tab list 9>&-) || return 1
 
-  # Collect the ids through an assignment rather than a process substitution, so
-  # that a jq failure is caught instead of quietly numbering nothing
-  tab_ids=$(printf '%s' "$tabs_json" | jq -r --arg fmt "$tab_format" --arg strip "$tab_strip" "$numbering | .tab_id" 9>&-) || return 1
+  # Capture the whole result before updating: a jq error after partial output
+  # must fail the pass instead of applying an incomplete set of labels.
+  # An empty id would shift the label into the id field once read collapses the
+  # leading tab, and a NUL cannot survive a shell variable or a CLI argument
+  pairs=$(printf '%s' "$tabs_json" | jq -r --arg fmt "$tab_format" --arg strip "$tab_strip" "$numbering
+    | if (.tab_id | type != \"string\" or . == \"\") then error(\"tab id must be a non-empty string\")
+      elif (.want | explode | any(. == 0)) then error(\"tab label contains NUL: \(.tab_id)\")
+      else [.tab_id, .want] | @tsv end" 9>&-) || return 1
   # A here-string feeds an empty variable as one empty line, which would reach
   # tab rename as an empty id
-  [ -n "$tab_ids" ] || return 0
+  [ -n "$pairs" ] || return 0
 
-  # Take labels one at a time from the raw output of jq -r, with no delimiter in
-  # between. @tsv turns a backslash into \\ and read -r does not decode it, so a
-  # tab named "foo\bar" would gain a backslash on every rename and never converge
-  while IFS= read -r tab_id; do
-    label=$(printf '%s' "$tabs_json" | jq -r --arg fmt "$tab_format" --arg strip "$tab_strip" --arg id "$tab_id" "$numbering | select(.tab_id == \$id) | .want" 9>&-) || return 1
+  # @tsv escapes tabs, newlines, carriage returns and backslashes. Decode with
+  # printf -v so command substitution cannot strip trailing label newlines.
+  while IFS=$'\t' read -r tab_id encoded_label; do
+    printf -v label '%b' "$encoded_label"
     update_existing tab "$tab_id" rename "$label" || failed=1
-  done <<<"$tab_ids"
+  done <<<"$pairs"
   return "$failed"
 }
 

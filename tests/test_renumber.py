@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -93,6 +94,53 @@ class RenumberTests(unittest.TestCase):
         self.assertEqual([row["label"] for row in state["tabs"]], [r"[1] foo\bar", "[1]"])
         self.assertEqual([row["tokens"]["number"] for row in state["workspaces"]], ["(1)", "(2)"])
         self.assertEqual([row["tokens"]["wsnum"] for row in state["panes"]], ["(1)", "(1)"])
+
+    def test_tab_labels_preserve_escaped_characters(self):
+        labels = [r"foo\bar", r"literal\n\t\r\c\0\123", "two\tcolumns",
+                  "two\nlines", "carriage\rreturn", "trailing\n\n", "日本語 😀"]
+        state = copy.deepcopy(self.state)
+        state["tabs"] = [{"workspace_id": "w1", "tab_id": f"t{i}", "label": label}
+                         for i, label in enumerate(labels, 1)]
+        self.write_state(state)
+        self.assert_success(self.run_plugin())
+        self.assertEqual([row["label"] for row in self.read_state()["tabs"]],
+                         [f"[{i}] {label}" for i, label in enumerate(labels, 1)])
+        before = len(self.calls())
+        self.assert_success(self.run_plugin())
+        self.assertTrue(all(call[1] == "list" for call in self.calls()[before:]))
+
+    def test_tab_numbering_uses_one_jq_call(self):
+        jq = shutil.which("jq")
+        self.assertIsNotNone(jq)
+        wrapper = self.root / "jq"
+        log = self.root / "jq-calls.log"
+        # Only the tab projection passes --arg strip
+        wrapper.write_text('#!/bin/sh\ncase " $* " in *" --arg strip "*) echo tab >> ' +
+                           shlex.quote(str(log)) + ";; esac\nexec " + shlex.quote(jq) + ' "$@"\n')
+        wrapper.chmod(0o700)
+        self.assert_success(self.run_plugin(dict(self.env, PATH=str(self.root) + os.pathsep + self.env["PATH"])))
+        self.assertEqual(log.read_text().splitlines(), ["tab"])
+        self.assertEqual([row["label"] for row in self.read_state()["tabs"]],
+                         ["[1] shell", "[2]", r"[1] foo\bar"])
+
+    def test_partial_jq_output_does_not_rename_tabs(self):
+        state = copy.deepcopy(self.state)
+        state["tabs"][1]["label"] = None
+        self.write_state(state)
+        self.assertEqual(self.run_plugin().returncode, 1)
+        self.assertEqual(self.read_state()["tabs"], state["tabs"])
+        self.assertFalse(any(call[:2] == ["tab", "rename"] for call in self.calls()))
+
+    def test_invalid_tab_fails_before_any_rename(self):
+        for field, value in [("tab_id", ""), ("tab_id", None), ("label", "x\x001y")]:
+            with self.subTest(field=field, value=value):
+                (self.root / "calls.jsonl").unlink(missing_ok=True)
+                state = copy.deepcopy(self.state)
+                state["tabs"][1][field] = value
+                self.write_state(state)
+                self.assertEqual(self.run_plugin().returncode, 1)
+                self.assertEqual(self.read_state()["tabs"], state["tabs"])
+                self.assertFalse(any(call[:2] == ["tab", "rename"] for call in self.calls()))
 
     def test_format_change_converges(self):
         self.assert_success(self.run_plugin())
