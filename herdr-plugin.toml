@@ -7,7 +7,7 @@
 # See README.md for install steps and the reasoning behind the design.
 id = "kokatsu.numbering"
 name = "Numbering"
-version = "0.4.0"
+version = "0.4.1"
 min_herdr_version = "0.8.2"
 description = "Number tabs in their names and workspaces via sidebar metadata"
 platforms = ["linux", "macos"]
