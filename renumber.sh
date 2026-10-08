@@ -28,24 +28,17 @@ state_dir=${HERDR_PLUGIN_STATE_DIR:?renumber.sh: HERDR_PLUGIN_STATE_DIR is not s
 runtime_dir=${XDG_RUNTIME_DIR:-$state_dir}
 mkdir -p "$runtime_dir"
 
-# Each session has its own set of tabs, so key the state on the socket path.
-# The whole path is sanitized rather than reduced to its parent directory name:
-# the default session lives at ~/.config/herdr/herdr.sock and a named one at
-# ~/.config/herdr/sessions/<name>/herdr.sock, so the parent directory alone
-# collides between the default session and a session named "herdr", which is a
-# name herdr accepts. Hashing would be an option but sha256sum is not part of a
-# stock macOS
-session_key=$(printf '%s' "${HERDR_SOCKET_PATH:-default}" | tr -c '[:alnum:]._-' '_')
-lock_file="$runtime_dir/herdr-numbering.$session_key.lock"
-pending="$runtime_dir/herdr-numbering.$session_key.pending"
-
 # A failure to acquire the lock cannot be told apart from "another process holds
 # it", so a missing dependency would stop the numbering silently. Both are
 # checked up front and treated as fatal, which puts the reason in the hook log.
 # The assignment below does propagate a jq failure on its own, but the up-front
 # check names the missing dependency instead of leaving a bare jq error
 command -v perl >/dev/null || {
-  echo "renumber.sh: perl is required (used for flock)" >&2
+  echo "renumber.sh: perl is required (used for flock and Digest::SHA)" >&2
+  exit 1
+}
+perl -MDigest::SHA -e 1 2>/dev/null || {
+  echo "renumber.sh: perl module Digest::SHA is required" >&2
   exit 1
 }
 command -v jq >/dev/null || {
@@ -56,6 +49,13 @@ command -v "$herdr_bin" >/dev/null || {
   echo "renumber.sh: $herdr_bin not found (set HERDR_BIN_PATH)" >&2
   exit 1
 }
+
+# Hash the full socket path so separators and literal underscores cannot
+# collapse different sessions onto the same lock. Use Perl's Digest::SHA to
+# avoid requiring a separate hash executable.
+session_key=$(perl -MDigest::SHA=sha256_hex -e 'print sha256_hex($ARGV[0])' "${HERDR_SOCKET_PATH:-default}")
+lock_file="$runtime_dir/herdr-numbering.$session_key.lock"
+pending="$runtime_dir/herdr-numbering.$session_key.pending"
 
 # The number formats default to "[{n}]" for tabs and "({n})" for workspaces,
 # so the two kinds stay distinguishable at a glance. Both can be overridden
@@ -155,12 +155,23 @@ pane_tokens='
   | "\($pane.pane_id) \($want)"
 '
 
+# A failed update is harmless only if its target disappeared from a fresh
+# list. Other failures must reach the hook log without skipping later targets.
+update_existing() {
+  local kind=$1 id=$2 operation=$3 snapshot
+  shift 3
+  "$herdr_bin" "$kind" "$operation" "$id" "$@" 9>&- </dev/null >/dev/null && return 0
+  snapshot=$("$herdr_bin" "$kind" list 9>&- </dev/null) || return 1
+  printf '%s' "$snapshot" | jq -e --arg collection "${kind}s" --arg field "${kind}_id" --arg id "$id" \
+    '.result[$collection] | all(.[$field] != $id)' 9>&- >/dev/null
+}
+
 # Every fallible command here returns explicitly instead of leaning on errexit:
 # the caller invokes this on the left of ||, and that disables errexit for the
 # whole body, so a failed assignment would otherwise fall through to the empty
 # check and report success
 renumber() {
-  local tabs_json tab_ids tab_id label
+  local tabs_json tab_ids tab_id label failed=0
   tabs_json=$("$herdr_bin" tab list 9>&-) || return 1
 
   # Collect the ids through an assignment rather than a process substitution, so
@@ -175,11 +186,9 @@ renumber() {
   # tab named "foo\bar" would gain a backslash on every rename and never converge
   while IFS= read -r tab_id; do
     label=$(printf '%s' "$tabs_json" | jq -r --arg fmt "$tab_format" --arg strip "$tab_strip" --arg id "$tab_id" "$numbering | select(.tab_id == \$id) | .want" 9>&-) || return 1
-    # The list is a snapshot, so a tab can be gone by the time its turn comes -
-    # closing a pane is one of the events this plugin subscribes to. Letting
-    # that fail the run would leave every later tab on its old number
-    "$herdr_bin" tab rename "$tab_id" "$label" 9>&- >/dev/null || true
+    update_existing tab "$tab_id" rename "$label" || failed=1
   done <<<"$tab_ids"
+  return "$failed"
 }
 
 # The workspace pass reports each workspace's number as display-only metadata
@@ -187,7 +196,7 @@ renumber() {
 # an event this plugin subscribes to, and the metadata does not survive a
 # server restart (the startup hook re-reports it)
 number_workspaces() {
-  local ws_json=$1 pairs ws_id token
+  local ws_json=$1 pairs ws_id token failed=0
   pairs=$(printf '%s' "$ws_json" | jq -r --arg fmt "$workspace_format" "$ws_token" 9>&-) || return 1
   [ -n "$pairs" ] || return 0
 
@@ -195,16 +204,15 @@ number_workspaces() {
   # above keeps those free of whitespace; interior spaces (a format like
   # "No. {n}") land in $token verbatim
   while read -r ws_id token; do
-    # The workspace can be gone by the time its turn comes - workspace.closed
-    # is one of the triggers - so a failed report is tolerated
-    "$herdr_bin" workspace report-metadata "$ws_id" --source kokatsu.numbering --token number="$token" 9>&- >/dev/null || true
+    update_existing workspace "$ws_id" report-metadata --source kokatsu.numbering --token number="$token" || failed=1
   done <<<"$pairs"
+  return "$failed"
 }
 
 # Mirror each workspace's number onto its panes as a wsnum token, for the
 # agents section of the sidebar
 number_panes() {
-  local ws_json=$1 panes_json pairs pane_id token
+  local ws_json=$1 panes_json pairs pane_id token failed=0
   panes_json=$("$herdr_bin" pane list 9>&-) || return 1
 
   pairs=$(printf '%s' "$panes_json" | jq -r --arg fmt "$workspace_format" \
@@ -212,10 +220,9 @@ number_panes() {
   [ -n "$pairs" ] || return 0
 
   while read -r pane_id token; do
-    # The pane can be gone by the time its turn comes - pane.closed is one of
-    # the triggers - so a failed report is tolerated
-    "$herdr_bin" pane report-metadata "$pane_id" --source kokatsu.numbering --token wsnum="$token" 9>&- >/dev/null || true
+    update_existing pane "$pane_id" report-metadata --source kokatsu.numbering --token wsnum="$token" || failed=1
   done <<<"$pairs"
+  return "$failed"
 }
 
 # A rename re-fires tab.renamed even when the label is unchanged, so with many

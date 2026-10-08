@@ -80,8 +80,8 @@ changed freely.
   found through `HERDR_PLUGIN_CONFIG_DIR`; both were verified on 0.8.2
 - `bash`
 - `jq`
-- `perl` — used for `flock(2)`, because `flock(1)` from util-linux is not
-  available on macOS
+- `perl` with `Digest::SHA` — used for session keys and `flock(2)`, because
+  `flock(1)` from util-linux is not available on macOS
 
 ## Install
 
@@ -168,7 +168,8 @@ second pass finds no difference and issues no rename, so it converges.
 The lock and the pending marker live in `XDG_RUNTIME_DIR`, falling back to the
 directory herdr hands the plugin through `HERDR_PLUGIN_STATE_DIR`. Both are
 private to the user, and the first is cleared on reboot. They are keyed by the
-full socket path, so separate herdr sessions never share them.
+SHA-256 hash of the full socket path, so paths containing separators and
+underscores do not collapse onto the same key.
 
 Renaming a tab to the name it already has still emits `tab.renamed`, so a large
 tab set can fan out into more concurrent plugin commands than herdr allows
@@ -176,6 +177,23 @@ tab set can fan out into more concurrent plugin commands than herdr allows
 real work is funnelled through a single process: a run that cannot take the lock
 drops a pending marker and exits immediately, and the lock holder makes another
 pass over a fresh tab list.
+
+If a rename or metadata update fails, the plugin checks a fresh list and
+tolerates the failure only if the target has disappeared. Other failures are
+reported through a nonzero exit status after the remaining updates finish.
+
+## Development
+
+Run the regression tests with Python 3, using the runtime dependencies above:
+
+```bash
+python3 -B -m unittest discover -s tests -v
+```
+
+The tests use a fake herdr CLI and temporary state directories. They cover
+numbering, closing and reordering, format changes, steady-state writes,
+update and list failures, disappearing targets, concurrent events, and
+session isolation. They do not require or modify a running herdr session.
 
 ## License
 
