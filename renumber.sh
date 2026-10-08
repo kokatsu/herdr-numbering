@@ -36,8 +36,8 @@ mkdir -p "$runtime_dir"
 # name herdr accepts. Hashing would be an option but sha256sum is not part of a
 # stock macOS
 session_key=$(printf '%s' "${HERDR_SOCKET_PATH:-default}" | tr -c '[:alnum:]._-' '_')
-lock_file="$runtime_dir/herdr-tab-numbers.$session_key.lock"
-pending="$runtime_dir/herdr-tab-numbers.$session_key.pending"
+lock_file="$runtime_dir/herdr-numbering.$session_key.lock"
+pending="$runtime_dir/herdr-numbering.$session_key.pending"
 
 # A failure to acquire the lock cannot be told apart from "another process holds
 # it", so a missing dependency would stop the numbering silently. Both are
@@ -60,7 +60,7 @@ command -v "$herdr_bin" >/dev/null || {
 # The number formats default to "[{n}]" for tabs and "({n})" for workspaces,
 # so the two kinds stay distinguishable at a glance. Both can be overridden
 # from config.toml in the directory herdr assigns the plugin
-# (`herdr plugin config-dir kokatsu.tab-numbers`). Only the flat
+# (`herdr plugin config-dir kokatsu.numbering`). Only the flat
 # `key = "value"` form is recognized - pulling in a TOML parser for two keys
 # is not worth a new dependency, though a trailing comment after the closing
 # quote is tolerated - and a value without the {n} placeholder is ignored so a
@@ -197,7 +197,7 @@ number_workspaces() {
   while read -r ws_id token; do
     # The workspace can be gone by the time its turn comes - workspace.closed
     # is one of the triggers - so a failed report is tolerated
-    "$herdr_bin" workspace report-metadata "$ws_id" --source kokatsu.tab-numbers --token number="$token" 9>&- >/dev/null || true
+    "$herdr_bin" workspace report-metadata "$ws_id" --source kokatsu.numbering --token number="$token" 9>&- >/dev/null || true
   done <<<"$pairs"
 }
 
@@ -214,7 +214,7 @@ number_panes() {
   while read -r pane_id token; do
     # The pane can be gone by the time its turn comes - pane.closed is one of
     # the triggers - so a failed report is tolerated
-    "$herdr_bin" pane report-metadata "$pane_id" --source kokatsu.tab-numbers --token wsnum="$token" 9>&- >/dev/null || true
+    "$herdr_bin" pane report-metadata "$pane_id" --source kokatsu.numbering --token wsnum="$token" 9>&- >/dev/null || true
   done <<<"$pairs"
 }
 

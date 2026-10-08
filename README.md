@@ -1,4 +1,4 @@
-# herdr-tab-numbers
+# herdr-numbering
 
 A [herdr](https://github.com/herdrdev/herdr) plugin that prefixes every tab name
 with its position on the tab bar, and shows every workspace's position in the
@@ -53,7 +53,7 @@ The formats default to `[{n}]` for tabs and `({n})` for workspaces. To change
 either, create `config.toml` in the directory this prints:
 
 ```bash
-herdr plugin config-dir kokatsu.tab-numbers
+herdr plugin config-dir kokatsu.numbering
 ```
 
 ```toml
@@ -86,14 +86,14 @@ changed freely.
 ## Install
 
 ```bash
-herdr plugin install kokatsu/herdr-tab-numbers
+herdr plugin install kokatsu/herdr-numbering
 ```
 
 Or, to run from a local checkout:
 
 ```bash
-git clone https://github.com/kokatsu/herdr-tab-numbers
-herdr plugin link ./herdr-tab-numbers
+git clone https://github.com/kokatsu/herdr-numbering
+herdr plugin link ./herdr-numbering
 ```
 
 Tab numbering needs no configuration. Workspace numbers are exposed as
@@ -119,11 +119,38 @@ to a workspace by its number needs `switch_workspace` bound (unset by
 default, see above). Numbering is applied on startup and whenever the set of
 tabs, workspaces, or panes changes.
 
+### Migrating from herdr-tab-numbers
+
+This plugin was previously named `herdr-tab-numbers`, with the plugin ID
+`kokatsu.tab-numbers`. Before uninstalling the old plugin, save any
+`config.toml` from the directory printed by
+`herdr plugin config-dir kokatsu.tab-numbers`. Then uninstall it and install
+the renamed plugin:
+
+```bash
+herdr plugin uninstall kokatsu.tab-numbers
+herdr plugin install kokatsu/herdr-numbering
+```
+
+Restore the saved `config.toml` into the directory printed by
+`herdr plugin config-dir kokatsu.numbering`. For a local checkout, pull the
+rename, then unlink the old ID and link the checkout again instead of
+uninstalling and installing. `<path>` is the existing checkout; its directory
+does not need renaming:
+
+```bash
+herdr plugin unlink kokatsu.tab-numbers
+herdr plugin link <path>
+```
+
+The sidebar tokens remain `$number` and `$wsnum`, so the sidebar
+configuration needs no changes.
+
 ## How it works
 
 `renumber.sh` rewrites every tab name in every workspace to its numbered
 form, and reports every workspace's number as display-only metadata (source
-`kokatsu.tab-numbers`): token `number` on the workspace, and token `wsnum` on
+`kokatsu.numbering`): token `number` on the workspace, and token `wsnum` on
 each of its panes, because the agents section of the sidebar resolves custom
 tokens from pane metadata. It runs on `startup` (to recover after a server
 restart or live handoff — reported metadata does not survive one), on
