@@ -57,6 +57,20 @@ session_key=$(perl -MDigest::SHA=sha256_hex -e 'print sha256_hex($ARGV[0])' "${H
 lock_file="$runtime_dir/herdr-numbering.$session_key.lock"
 pending="$runtime_dir/herdr-numbering.$session_key.pending"
 
+# Turn a format template into the regex that recognizes labels it produced:
+# regex-escape every text segment and put [0-9]+ in each {n} hole
+format_to_regex() {
+  local rest=$1 literal escaped
+  while [[ $rest == *"{n}"* ]]; do
+    literal=${rest%%"{n}"*}
+    escaped=$(printf '%s' "$literal" | sed 's/[][\\.^$*+?(){}|]/\\&/g') || return 1
+    printf '%s[0-9]+' "$escaped"
+    rest=${rest#*"{n}"}
+  done
+  escaped=$(printf '%s' "$rest" | sed 's/[][\\.^$*+?(){}|]/\\&/g') || return 1
+  printf '%s' "$escaped"
+}
+
 # The number formats default to "[{n}]" for tabs and "({n})" for workspaces,
 # so the two kinds stay distinguishable at a glance. Both can be overridden
 # from config.toml in the directory herdr assigns the plugin
@@ -65,41 +79,33 @@ pending="$runtime_dir/herdr-numbering.$session_key.pending"
 # is not worth a new dependency, though a trailing comment after the closing
 # quote is tolerated - and a value without the {n} placeholder is ignored so a
 # typo cannot erase every number
-tab_format='[{n}]'
-workspace_format='({n})'
-config_file=${HERDR_PLUGIN_CONFIG_DIR:+$HERDR_PLUGIN_CONFIG_DIR/config.toml}
-if [ -n "$config_file" ] && [ -f "$config_file" ]; then
-  # Whitespace around a format is trimmed off: herdr trims reported token
-  # values before storing them (verified on 0.8.2), so a padded workspace
-  # format would never equal the stored token and the mismatch gates below
-  # would re-report every workspace and pane on every event
-  trim='s/^[[:space:]]*//;s/[[:space:]]*$//'
-  v=$(sed -n 's/^[[:space:]]*tab_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1 | sed "$trim")
-  case $v in *"{n}"*) tab_format=$v ;; esac
-  v=$(sed -n 's/^[[:space:]]*workspace_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1 | sed "$trim")
-  case $v in *"{n}"*) workspace_format=$v ;; esac
-fi
+#
+# Every step returns its failure explicitly: load_config runs as the left side
+# of ||, where set -e is suspended for the whole function body
+load_config() {
+  local trim v
+  tab_format='[{n}]'
+  workspace_format='({n})'
+  config_file=${HERDR_PLUGIN_CONFIG_DIR:+$HERDR_PLUGIN_CONFIG_DIR/config.toml}
+  if [ -n "$config_file" ] && [ -f "$config_file" ]; then
+    # Whitespace around a format is trimmed off: herdr trims reported token
+    # values before storing them (verified on 0.8.2), so a padded workspace
+    # format would never equal the stored token and the mismatch gates below
+    # would re-report every workspace and pane on every event
+    trim='s/^[[:space:]]*//;s/[[:space:]]*$//'
+    v=$(sed -n 's/^[[:space:]]*tab_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1 | sed "$trim") || return 1
+    case $v in *"{n}"*) tab_format=$v ;; esac
+    v=$(sed -n 's/^[[:space:]]*workspace_format[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | tail -n 1 | sed "$trim") || return 1
+    case $v in *"{n}"*) workspace_format=$v ;; esac
+  fi
 
-# Turn a format template into the regex that recognizes labels it produced:
-# regex-escape every text segment and put [0-9]+ in each {n} hole
-format_to_regex() {
-  local rest=$1 literal escaped
-  while [[ $rest == *"{n}"* ]]; do
-    literal=${rest%%"{n}"*}
-    escaped=$(printf '%s' "$literal" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
-    printf '%s[0-9]+' "$escaped"
-    rest=${rest#*"{n}"}
-  done
-  escaped=$(printf '%s' "$rest" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
-  printf '%s' "$escaped"
+  # The strip pattern accepts the configured format plus the shipped default
+  # ([N]), so switching away from the default migrates existing labels instead
+  # of stacking a second prefix on top of the old one. No other alternates:
+  # anything else a label starts with is a real name, and stripping more than
+  # the formats this plugin actually writes would eat it
+  tab_strip="^($(format_to_regex "$tab_format")\\s*|\\[[0-9]+\\]\\s*)" || return 1
 }
-
-# The strip pattern accepts the configured format plus the shipped default
-# ([N]), so switching away from the default migrates existing labels instead
-# of stacking a second prefix on top of the old one. No other alternates:
-# anything else a label starts with is a real name, and stripping more than
-# the formats this plugin actually writes would eat it
-tab_strip="^($(format_to_regex "$tab_format")\\s*|\\[[0-9]+\\]\\s*)"
 
 # Project one tab into {tab_id, label, want} and keep only the ones that need a
 # rename. $tab and friends are jq variables, so keep the shell out of them
@@ -141,16 +147,18 @@ ws_token='
 # contain spaces, tokens can
 # shellcheck disable=SC2016
 pane_tokens='
-  ($ws.result.workspaces | map({key: .workspace_id, value: .number}) | from_entries) as $num
+  ($ws.result.workspaces | map(select(.number != null) | .number as $n | {
+    key: .workspace_id,
+    value: ($fmt | gsub("\\{n\\}"; ($n | tostring)))
+  }) | from_entries) as $tokens
   | .result.panes[]
   | . as $pane
   # Indexing with null throws in jq, so a pane record without a workspace_id
   # (none seen live, but not guaranteed during teardown) must not kill the
   # whole pass
   | select($pane.workspace_id != null)
-  | $num[$pane.workspace_id] as $n
-  | select($n != null)
-  | ($fmt | gsub("\\{n\\}"; ($n | tostring))) as $want
+  | $tokens[$pane.workspace_id] as $want
+  | select($want != null)
   | select(($pane.tokens.wsnum? // "") != $want)
   | "\($pane.pane_id) \($want)"
 '
@@ -204,8 +212,8 @@ number_workspaces() {
   pairs=$(printf '%s' "$ws_json" | jq -r --arg fmt "$workspace_format" "$ws_token" 9>&-) || return 1
   [ -n "$pairs" ] || return 0
 
-  # read's IFS split only touches the edges of the token, and the format trim
-  # above keeps those free of whitespace; interior spaces (a format like
+  # read's IFS split only touches the edges of the token, and load_config's
+  # format trim keeps those free of whitespace; interior spaces (a format like
   # "No. {n}") land in $token verbatim
   while read -r ws_id token; do
     update_existing workspace "$ws_id" report-metadata --source kokatsu.numbering --token number="$token" || failed=1
@@ -278,6 +286,12 @@ trap 'exit 129' HUP
 acquire || exit 0
 
 pass_failed=""
+config_failed=""
+load_config || {
+  echo "renumber.sh: config load failed" >&2
+  pass_failed=1
+  config_failed=1
+}
 
 while :; do
   rm -f "$pending"
@@ -285,24 +299,28 @@ while :; do
   # would strand the marker with no process left to act on it, so record it and
   # carry on to the check below, then exit non-zero once the loop is done so the
   # plugin log does not record the run as a success
-  renumber || {
-    echo "renumber.sh: renumber pass failed" >&2
-    pass_failed=1
-  }
-  # One snapshot serves both passes: it halves the plugin-command IPC per
-  # event and keeps the two passes from disagreeing about the numbers
-  if ws_json=$("$herdr_bin" workspace list 9>&-); then
-    number_workspaces "$ws_json" || {
-      echo "renumber.sh: workspace pass failed" >&2
+  # Without the configured formats, numbering with the defaults would relabel
+  # everything, so skip the passes but still reach the pending check below
+  if [ -z "$config_failed" ]; then
+    renumber || {
+      echo "renumber.sh: renumber pass failed" >&2
       pass_failed=1
     }
-    number_panes "$ws_json" || {
-      echo "renumber.sh: pane pass failed" >&2
+    # One snapshot serves both passes: it halves the plugin-command IPC per
+    # event and keeps the two passes from disagreeing about the numbers
+    if ws_json=$("$herdr_bin" workspace list 9>&-); then
+      number_workspaces "$ws_json" || {
+        echo "renumber.sh: workspace pass failed" >&2
+        pass_failed=1
+      }
+      number_panes "$ws_json" || {
+        echo "renumber.sh: pane pass failed" >&2
+        pass_failed=1
+      }
+    else
+      echo "renumber.sh: workspace list failed" >&2
       pass_failed=1
-    }
-  else
-    echo "renumber.sh: workspace list failed" >&2
-    pass_failed=1
+    fi
   fi
   # Check for pending work only after dropping the lock. Checking while still
   # holding it and then leaving lets a process that arrives between the check

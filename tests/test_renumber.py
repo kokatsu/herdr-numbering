@@ -262,6 +262,72 @@ class RenumberTests(unittest.TestCase):
         _, stderr = process.communicate(timeout=15)
         self.assertEqual(process.returncode, 0, stderr)
 
+    def test_contending_process_skips_configuration(self):
+        (self.root / "config" / "config.toml").write_text('tab_format = "<{n}>"\n')
+        process, gate = self.start_gated()
+        sed = shutil.which("sed")
+        self.assertIsNotNone(sed)
+        log = self.root / "sed-calls.log"
+        wrapper = self.root / "sed"
+        wrapper.write_text("#!/bin/sh\nprintf 'sed\\n' >> " + shlex.quote(str(log)) +
+                           "\nexec " + shlex.quote(sed) + ' "$@"\n')
+        wrapper.chmod(0o700)
+        env = dict(self.env, PATH=str(self.root) + os.pathsep + self.env["PATH"])
+        self.assert_success(self.run_plugin(env))
+        self.assertFalse(log.exists())
+        self.assertEqual(len(self.calls()), 1)
+        (gate / "release").touch()
+        _, stderr = process.communicate(timeout=15)
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(self.read_state()["tabs"][0]["label"], "<1> shell")
+        self.assertFalse(list(self.root.glob("*.pending")))
+
+    def test_config_failure_reaches_pending_check(self):
+        (self.root / "config" / "config.toml").write_text('tab_format = "<{n}>"\n')
+        gate = self.root / "gate"
+        gate.mkdir()
+        sed = self.root / "sed"
+        sed.write_text("#!/bin/sh\n: > " + shlex.quote(str(gate / "entered")) +
+                       "\nwhile [ ! -e " + shlex.quote(str(gate / "release")) +
+                       " ]; do sleep 0.01; done\nexit 1\n")
+        sed.chmod(0o700)
+        env = dict(self.env, PATH=str(self.root) + os.pathsep + self.env["PATH"])
+        process = subprocess.Popen(["bash", str(REPO / "renumber.sh")], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.finish_process, process, gate)
+        deadline = time.monotonic() + 5
+        while not (gate / "entered").exists():
+            if process.poll() is not None or time.monotonic() >= deadline:
+                self.fail("lock holder did not reach config loading")
+            time.sleep(0.01)
+        self.assert_success(self.run_plugin(env))
+        (gate / "release").touch()
+        _, stderr = process.communicate(timeout=15)
+        self.assertEqual(process.returncode, 1, stderr)
+        self.assertIn("config load failed", stderr)
+        self.assertFalse(list(self.root.glob("*.pending")))
+        self.assertFalse((self.root / "calls.jsonl").exists())
+
+    def test_shared_workspace_pane_tokens(self):
+        (self.root / "config" / "config.toml").write_text('workspace_format = "No. {n} / {n}"\n')
+        state = copy.deepcopy(self.state)
+        state["workspaces"].append({"workspace_id": "w3", "number": None, "tokens": {}})
+        state["panes"] += [
+            {"pane_id": "p3", "workspace_id": "w1", "tokens": {}},
+            {"pane_id": "p4", "workspace_id": "w1", "tokens": {"wsnum": "No. 1 / 1"}},
+            {"pane_id": "p5", "workspace_id": None, "tokens": {}},
+            {"pane_id": "p6", "workspace_id": "gone", "tokens": {}},
+            {"pane_id": "p7", "workspace_id": "w3", "tokens": {}},
+        ]
+        self.write_state(state)
+        self.assert_success(self.run_plugin())
+        self.assertEqual([row["tokens"] for row in self.read_state()["panes"]], [
+            {"wsnum": "No. 1 / 1"}, {"wsnum": "No. 2 / 2"}, {"wsnum": "No. 1 / 1"},
+            {"wsnum": "No. 1 / 1"}, {}, {}, {},
+        ])
+        reports = [call[2] for call in self.calls() if call[:2] == ["pane", "report-metadata"]]
+        self.assertEqual(reports, ["p1", "p2", "p3"])
+
 
 if __name__ == "__main__":
     unittest.main()
